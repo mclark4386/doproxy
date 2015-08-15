@@ -150,7 +150,7 @@ class DOProxy
       shutdown = @client.droplet_actions.shutdown(droplet_id: mdrop.id)
 
       if shutdown 
-        if shutdown.try( :status )
+        if shutdown['status']
           while shutdown.status != "completed"
             puts ".."
             sleep(2)
@@ -174,13 +174,13 @@ class DOProxy
       puts "Creating snapshot.."
       snapshot = @client.droplet_actions.snapshot(droplet_id: mdrop.id, name: @clone_image) 
 
-      if snapshot.try( :id ) and snapshot.id == 'unprocessable_entity'
+      if snapshot['id'] and snapshot.id == 'unprocessable_entity'
         puts snapshot.message
         return
       end
 
 
-      if snapshot and snapshot.try( :status )
+      if snapshot and snapshot['status']
         while snapshot.status != "completed"
           puts ".."
           sleep(2)
