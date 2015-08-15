@@ -21,6 +21,9 @@ class DOProxy
     @region = config['droplet_options']['region']
     @size = config['droplet_options']['size']
     @image = config['droplet_options']['image']
+    @master = config['droplet_options']['master']
+    @clone_image = config['droplet_options']['clone_image']
+    @snapshot_overwrite = config['droplet_options']['snapshot_overwrite']
 
     @client = DropletKit::Client.new(access_token: config['token'])
     @backend_count
@@ -121,6 +124,115 @@ class DOProxy
     `service haproxy reload`
   end
 
+  def clone_server
+    hostname = "#{@hostname_prefix}-#{@backend_count}"
+    userdata = File.open(@userdata_file).read
+
+    mdrop = nil
+
+    @client.droplets.all.each do |droplet|
+      if droplet.name == @master
+        puts droplet.id
+        mdrop = droplet
+      end
+    end
+
+    if mdrop.nil?
+      puts "@master=|"+@master+"|"
+      puts "Could not find master droplet"
+      return
+    end
+
+    image = imageWithName(@clone_image)
+
+    if image.nil? or @snapshot_overwrite
+      puts "Shutting down master.."
+      shutdown = @client.droplet_actions.shutdown(droplet_id: mdrop.id)
+
+      if shutdown 
+        if shutdown.try( :status )
+          while shutdown.status != "completed"
+            puts ".."
+            sleep(2)
+            shutdown = @client.actions.find(id: shutdown.id)
+          end
+        else 
+          if shutdown['id']
+            if shutdown['id'] == 'unprocessable_entity'
+              puts shutdown.message
+            end
+          else
+            puts "Not sure what happened, but here is the response:"+shutdown
+            return
+          end
+        end
+      else
+        puts "Not sure what happend, but no response from trying to shutdown the master"
+        return
+      end
+
+      puts "Creating snapshot.."
+      snapshot = @client.droplet_actions.snapshot(droplet_id: mdrop.id, name: @clone_image) 
+
+      if snapshot.try( :id ) and snapshot.id == 'unprocessable_entity'
+        puts snapshot.message
+        return
+      end
+
+
+      if snapshot and snapshot.try( :status )
+        while snapshot.status != "completed"
+          puts ".."
+          sleep(2)
+          snapshot = @client.actions.find(id: snapshot.id)
+        end
+      else
+        puts "Not sure what happened, but here is the response:"+snapshot
+        return
+      end
+
+      @client.droplet_actions.power_on(droplet_id: mdrop.id)
+
+      image = imageWithName(@clone_image)
+    end
+
+    if image.nil?
+      puts "Image was not created"
+      return
+    end
+
+    puts "Creating Droplet from snapshot.."
+    
+    droplet = DropletKit::Droplet.new(name: hostname, region: @region, size: @size, image: image.id, private_networking: true, ssh_keys: @ssh_key_ids, user_data: userdata)
+    created = @client.droplets.create(droplet)
+    droplet_id = created.id
+
+    if (created.status == 'new')
+      while created.status != 'active'
+        sleep(15)  # wait for droplet to become active before checking again
+        created = @client.droplets.find(id: droplet_id)
+      end
+      # droplet status is now 'active'
+      backend_inventory = File.open(@inventory_file, 'a')
+      backend_inventory.write("#{droplet_id}\n")
+      backend_inventory.close
+      @backend_count += 1
+      @droplets.push(created) # add droplet to array so it gets included in haproxy.cfg
+      reload_haproxy
+      puts "Success: #{droplet_id} created and added to backend."
+    else
+      puts "Some error has occurred on droplet create (status was not 'new')"
+    end    
+  end
+
+  def imageWithName(name)
+    @client.images.all(public: false).each do |image|
+      if image.name == name
+        return image
+      end
+    end
+    return nil
+  end
 
 end
 
@@ -144,6 +256,8 @@ else
     proxy.print_inventory
   when "create"
     proxy.create_server
+  when "clone"
+    proxy.clone_server
   when "delete"
     if ARGV[1] != nil
       proxy.delete_server(ARGV[1].to_i)
